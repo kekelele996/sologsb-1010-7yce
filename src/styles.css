@@ -213,3 +213,59 @@ md-linear-progress { width: 100%; --md-linear-progress-active-indicator-color: #
   .workspace-grid, .editor-panel, .line-list { display: block; height: auto; overflow: visible; background: white; padding: 0; }
   .line-card { break-inside: avoid; box-shadow: none; }
 }
+
+/* 校对包合入报告弹窗 */
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 100;
+  display: grid; place-items: center;
+  background: rgba(15, 32, 27, .46); padding: 24px;
+}
+.modal-card {
+  width: min(680px, 100%); max-height: 86vh;
+  display: flex; flex-direction: column;
+  background: #fbfdfb; border-radius: 14px;
+  box-shadow: 0 18px 50px rgba(12, 30, 24, .3); overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 18px 22px 14px; border-bottom: 1px solid var(--line); background: #f1f7f4;
+}
+.modal-head h3 { margin: 3px 0 0; font: 700 17px/1.3 Georgia, serif; }
+.merge-status {
+  flex-shrink: 0; padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 700;
+}
+.merge-status.complete { background: #dff2e8; color: var(--success); }
+.merge-status.partial { background: #fff0d6; color: var(--warning); }
+.modal-body { padding: 16px 22px; overflow: auto; }
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 13px 22px; border-top: 1px solid var(--line); background: #f1f7f4;
+}
+.merge-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.merge-metrics { gap: 18px; margin: 0 0 14px; font-size: 12px; }
+.merge-metrics strong { font-size: 15px; color: var(--ink); }
+.merge-block { margin-bottom: 16px; }
+.merge-block h4 { margin: 0 0 8px; font-size: 13px; color: #244f43; }
+.merge-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.merge-list li {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: white; font-size: 12px;
+}
+.merge-list li strong { color: #244f43; font-size: 12px; }
+.merge-list li span { color: var(--muted); line-height: 1.5; }
+.merge-list li.rule-conflicts .affected { color: var(--warning); font-weight: 600; }
+
+/* 待选面板 */
+.pending-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: white; margin-bottom: 10px; }
+.pending-card.blocked { border-color: #efd7ad; background: #fffaf0; }
+.pending-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.pending-head strong { font-size: 13px; color: #244f43; }
+.pending-head span { color: var(--muted); font-size: 11px; }
+.pending-versions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pending-version { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #f5f9f7; }
+.pending-version.theirs { border-color: #c7dbd2; background: #eef7f2; }
+.pending-version h5 { margin: 0 0 5px; font-size: 11px; color: #527269; }
+.pending-version p { margin: 2px 0; font-size: 11px; line-height: 1.5; color: #43534e; }
+.pending-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 9px; }
+.blocked-source { margin: 0 0 4px; font-size: 12px; color: #43534e; }
+.blocked-rule { margin: 0; font-size: 11px; color: var(--warning); font-weight: 600; }

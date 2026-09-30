@@ -89,10 +89,16 @@ const base: ProjectState = {
   ],
   issues: [],
   versions: [],
+  pendingChoices: [],
+  blockedLines: [],
+  submissions: [],
   lastCheckedAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
 
 export function createInitialProject(): ProjectState {
-  return analyzeProject(base);
+  const project = analyzeProject(base);
+  // 记录本机草稿起点，作为导出校对包时三方合并的基线。
+  const { mergeAncestor: _ancestor, ...startingSnapshot } = project;
+  return { ...project, mergeAncestor: startingSnapshot as ProjectState };
 }

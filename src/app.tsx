@@ -2,10 +2,27 @@ import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { analyzeProject, brailleCellCount, makeRule, outputText, updateRuleInSet } from './braille';
 import { createInitialProject } from './sample';
-import type { HistoryState, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
+import {
+  createProofPackage,
+  isBasePackage,
+  isProofPackage,
+  mergeProofPackage,
+  resolvePendingChoice,
+} from './merge';
+import type { BlockedLine, HistoryState, MergeReport, PendingChoice, ProofIssue, ProofPackage, ProjectState, TextbookLine, VersionSnapshot } from './types';
 
 const STORAGE_KEY = 'sologsb-1010-braille-project-v1';
+const PACKAGE_STORAGE_KEY = 'sologsb-1010-braille-packages-v1';
 const HISTORY_LIMIT = 60;
+
+function normalizeState(state: ProjectState): ProjectState {
+  return {
+    ...state,
+    pendingChoices: state.pendingChoices ?? [],
+    blockedLines: state.blockedLines ?? [],
+    submissions: state.submissions ?? [],
+  };
+}
 
 type HistoryAction =
   | { type: 'commit'; label: string; update: (state: ProjectState) => ProjectState }
@@ -55,7 +72,7 @@ function loadInitialState(): ProjectState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as ProjectState;
-      return analyzeProject(parsed);
+      return normalizeState(analyzeProject(parsed));
     }
   } catch {
     // 清除损坏草稿并使用内置示例。
@@ -81,6 +98,29 @@ function useProject() {
   const restore = (state: ProjectState) => dispatch({ type: 'restore', label: '恢复版本', state });
 
   return { state: history.present, history, commit, undo, redo, restore };
+}
+
+/** 把校对包存到本机，供“重试合入”时不必重新挑文件。 */
+function storePackage(pkg: ProofPackage): void {
+  try {
+    const raw = localStorage.getItem(PACKAGE_STORAGE_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, ProofPackage>) : {};
+    map[pkg.packageId] = pkg;
+    localStorage.setItem(PACKAGE_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // 存储失败不影响合并主流程。
+  }
+}
+
+function loadStoredPackage(packageId: string): ProofPackage | undefined {
+  try {
+    const raw = localStorage.getItem(PACKAGE_STORAGE_KEY);
+    if (!raw) return undefined;
+    const map = JSON.parse(raw) as Record<string, ProofPackage>;
+    return map[packageId];
+  } catch {
+    return undefined;
+  }
 }
 
 function formatTime(value: string): string {
@@ -479,9 +519,164 @@ function VersionsPanel({ state, onSnapshot, onRestore }: { state: ProjectState; 
   );
 }
 
+function MergeReportDialog({ report, onClose, onRetry }: { report: MergeReport; onClose: () => void; onRetry: () => void }) {
+  const complete = report.status === 'complete';
+  return (
+    <div class="modal-scrim" onClick={onClose}>
+      <div class="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div class="modal-head">
+          <div>
+            <span class="eyebrow">校对包合入报告</span>
+            <h3>{report.author} · {formatTime(report.exportedAt)} 提交</h3>
+          </div>
+          <span class={`merge-status ${complete ? 'complete' : 'partial'}`}>{complete ? '全部合上' : '部分合上'}</span>
+        </div>
+
+        <div class="modal-body">
+          {report.openedAsDraft && (
+            <p class="merge-note">这是一份起始草稿包，已作为本机草稿打开，并记录基线；之后导出的校对包会以它为合并起点。</p>
+          )}
+
+          {!report.openedAsDraft && (
+            <>
+              <div class="metric-row merge-metrics">
+                <span>已合并 <strong>{report.mergedCount}</strong> 行</span>
+                <span>新增 <strong>{report.addedCount}</strong> 行</span>
+                <span>行冲突 <strong>{report.lineConflicts.length}</strong> 处</span>
+                <span>规则冲突 <strong>{report.ruleConflicts.length}</strong> 条</span>
+                <span>未合上 <strong>{report.blockedLines.length}</strong> 行</span>
+              </div>
+
+              {report.lineConflicts.length > 0 && (
+                <div class="merge-block">
+                  <h4>行冲突（已按“原文按组里、状态备注按后交老师”自动合入，落选版本见“待选”）</h4>
+                  <ul class="merge-list">
+                    {report.lineConflicts.map((item) => (
+                      <li key={item.lineId}>
+                        <strong>第 {item.lineNumber} 行</strong>
+                        <span>组里原文「{item.ours.source}」· 采用 {report.author} 的状态「{item.theirs.status}」与备注</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {report.ruleConflicts.length > 0 && (
+                <div class="merge-block">
+                  <h4>规则集对不上，已先停下述规则；受影响行未合上，等重试</h4>
+                  <ul class="merge-list rule-conflicts">
+                    {report.ruleConflicts.map((item, index) => (
+                      <li key={`${item.ruleId}-${index}`}>
+                        <strong>{item.ruleSource}</strong>
+                        <span>组里：{item.ours.enabled ? '启用' : '停用'} / 输出「{item.ours.output}」</span>
+                        <span>老师：{item.theirs.enabled ? '启用' : '停用'} / 输出「{item.theirs.output}」</span>
+                        <span class="affected">影响第 {item.affectedLineNumbers.join('、')} 行</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {report.blockedLines.length > 0 && (
+                <div class="merge-block">
+                  <h4>未合上的行（已并好的行已保留；请按上述规则冲突调整规则后重试）</h4>
+                  <ul class="merge-list">
+                    {report.blockedLines.map((item) => (
+                      <li key={item.id}>
+                        <strong>第 {item.lineNumber} 行</strong>
+                        <span>「{item.source}」· 卡在规则 {item.ruleSource}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {complete && report.lineConflicts.length === 0 && report.ruleConflicts.length === 0 && (
+                <p class="merge-note">没有冲突，{report.mergedCount} 行已全部合入。</p>
+              )}
+            </>
+          )}
+        </div>
+
+        <div class="modal-foot">
+          {!report.openedAsDraft && report.blockedLines.length > 0 && (
+            <md-filled-tonal-button onClick={onRetry}>重试合入此包</md-filled-tonal-button>
+          )}
+          <md-filled-button onClick={onClose}>知道了</md-filled-button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PendingPanel({
+  pendingChoices,
+  blockedLines,
+  onResolve,
+  onRetry,
+}: {
+  pendingChoices: PendingChoice[];
+  blockedLines: BlockedLine[];
+  onResolve: (choiceId: string, side: 'ours' | 'theirs') => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div class="inspector-body">
+      {pendingChoices.length === 0 && blockedLines.length === 0 && (
+        <div class="empty-state"><span>✓</span><strong>没有待选内容</strong><p>合入校对包后，行冲突的落选版本会留在这里供组长挑选。</p></div>
+      )}
+
+      {pendingChoices.length > 0 && (
+        <>
+          <div class="snapshot-callout">
+            <div><strong>行冲突待选</strong><p>两边都改过的行，默认原文按组里、状态备注按后交老师；落选版本由组长拍板。</p></div>
+          </div>
+          {pendingChoices.map((choice) => (
+            <div class="pending-card" key={choice.id}>
+              <div class="pending-head"><strong>第 {choice.lineNumber} 行</strong><span>{choice.theirsAuthor} 提交</span></div>
+              <div class="pending-versions">
+                <div class="pending-version">
+                  <h5>组里版</h5>
+                  <p>原文：{choice.ours.source || '（空）'}</p>
+                  <p>状态：{choice.ours.status} · 备注：{choice.ours.note || '无'}</p>
+                </div>
+                <div class="pending-version theirs">
+                  <h5>老师版（{choice.theirsAuthor}）</h5>
+                  <p>原文：{choice.theirs.source || '（空）'}</p>
+                  <p>状态：{choice.theirs.status} · 备注：{choice.theirs.note || '无'}</p>
+                </div>
+              </div>
+              <div class="pending-actions">
+                <md-text-button onClick={() => onResolve(choice.id, 'ours')}>采用组里版</md-text-button>
+                <md-filled-tonal-button onClick={() => onResolve(choice.id, 'theirs')}>采用老师版</md-filled-tonal-button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {blockedLines.length > 0 && (
+        <>
+          <div class="snapshot-callout">
+            <div><strong>未合上的行</strong><p>规则集两边对不上，这些行已拦下；调整规则后重新合入同一份包即可补上，不会重复记录。</p></div>
+            <md-filled-tonal-button onClick={onRetry}>重试合入</md-filled-tonal-button>
+          </div>
+          {blockedLines.map((line) => (
+            <div class="pending-card blocked" key={line.id}>
+              <div class="pending-head"><strong>第 {line.lineNumber} 行</strong><span>{line.theirsAuthor} 提交</span></div>
+              <p class="blocked-source">「{line.source}」</p>
+              <p class="blocked-rule">卡在规则：{line.ruleSource}</p>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const { state, history, commit, undo, redo, restore } = useProject();
-  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'versions'>('issues');
+  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'versions' | 'pending'>('issues');
   const selectedLineRef = useRef(state.selectedLineId);
   selectedLineRef.current = state.selectedLineId;
 
@@ -583,6 +778,78 @@ export default function App() {
     printWindow.document.close();
   };
 
+  const [mergeReport, setMergeReport] = useState<MergeReport | null>(null);
+  const packageInputRef = useRef<HTMLInputElement>(null);
+  const lastPackageIdRef = useRef<string | null>(null);
+
+  const exportPackage = () => {
+    const author = window.prompt('校对包署名（哪位老师提交？）', state.author) ?? state.author;
+    const pkg = createProofPackage(state, author || '未署名老师');
+    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${state.title.replace(/[^\p{L}\p{N}-]+/gu, '-')}-校对包.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePackageFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const pkg = JSON.parse(String(reader.result)) as unknown;
+        if (!isProofPackage(pkg)) {
+          window.alert('这不是 BrailleAtelier 校对包文件（格式不符）。');
+          return;
+        }
+        const base = isBasePackage(pkg);
+        if (base) {
+          const ok = window.confirm(
+            `这是「${pkg.author}」的起始草稿包（${formatTime(pkg.exportedAt)}）。\n\n将作为本机草稿打开，并记录为之后导出校对包的基线。继续？`,
+          );
+          if (!ok) return;
+        }
+        const outcome = mergeProofPackage(state, pkg);
+        if (!base) {
+          storePackage(pkg);
+          lastPackageIdRef.current = pkg.packageId;
+        }
+        commit(base ? '打开起始草稿包' : '合入校对包', () => outcome.state);
+        setMergeReport(outcome.report);
+        if (outcome.report.lineConflicts.length > 0 || outcome.report.blockedLines.length > 0) {
+          setInspectorTab('pending');
+        }
+      } catch (error) {
+        window.alert(`校对包解析失败：${(error as Error).message}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const retryMerge = () => {
+    const packageId = lastPackageIdRef.current;
+    if (!packageId) {
+      window.alert('找不到已存的校对包，请重新选择同一份包文件。');
+      return;
+    }
+    const pkg = loadStoredPackage(packageId);
+    if (!pkg) {
+      window.alert('本机没有缓存这份校对包，请重新选择文件。');
+      return;
+    }
+    const outcome = mergeProofPackage(state, pkg);
+    commit('重试合入校对包', () => outcome.state);
+    setMergeReport(outcome.report);
+    if (outcome.report.lineConflicts.length > 0 || outcome.report.blockedLines.length > 0) {
+      setInspectorTab('pending');
+    }
+  };
+
+  const resolveChoice = (choiceId: string, side: 'ours' | 'theirs') => {
+    commit('处理行冲突待选', (current) => resolvePendingChoice(current, choiceId, side));
+  };
+
   const updateRule = (ruleId: string, patch: Record<string, unknown>) => {
     commit('修改转录规则', (current) => {
       const ruleSet = current.ruleSets.find((set) => set.id === current.activeRuleSetId) ?? current.ruleSets[0];
@@ -630,6 +897,19 @@ export default function App() {
           <md-icon-button onClick={redo} disabled={history.future.length === 0} aria-label="重做" title="重做 ⇧⌘Z">↷</md-icon-button>
           <md-outlined-button onClick={exportText}>导出文本</md-outlined-button>
           <md-filled-button onClick={exportPrint}>打印版导出</md-filled-button>
+          <md-outlined-button onClick={exportPackage}>导出校对包</md-outlined-button>
+          <md-filled-tonal-button onClick={() => packageInputRef.current?.click()}>合入校对包</md-filled-tonal-button>
+          <input
+            ref={packageInputRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: 'none' }}
+            onChange={(event) => {
+              const file = (event.currentTarget as HTMLInputElement).files?.[0];
+              if (file) handlePackageFile(file);
+              (event.currentTarget as HTMLInputElement).value = '';
+            }}
+          />
         </div>
       </header>
 
@@ -691,6 +971,7 @@ export default function App() {
             <button class={inspectorTab === 'issues' ? 'active' : ''} onClick={() => setInspectorTab('issues')}>问题 {unresolvedCount > 0 && <span>{unresolvedCount}</span>}</button>
             <button class={inspectorTab === 'rules' ? 'active' : ''} onClick={() => setInspectorTab('rules')}>规则详情</button>
             <button class={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>版本 {state.versions.length > 0 && <span>{state.versions.length}</span>}</button>
+            <button class={inspectorTab === 'pending' ? 'active' : ''} onClick={() => setInspectorTab('pending')}>待选 {(state.pendingChoices.length + state.blockedLines.length) > 0 && <span>{state.pendingChoices.length + state.blockedLines.length}</span>}</button>
           </div>
           {inspectorTab === 'issues' && (
             <IssuesPanel
@@ -711,8 +992,24 @@ export default function App() {
             const restored: ProjectState = cloneState({ ...version.snapshot, versions: state.versions });
             restore(restored);
           }} />}
+          {inspectorTab === 'pending' && (
+            <PendingPanel
+              pendingChoices={state.pendingChoices}
+              blockedLines={state.blockedLines}
+              onResolve={resolveChoice}
+              onRetry={retryMerge}
+            />
+          )}
         </aside>
       </div>
+
+      {mergeReport && (
+        <MergeReportDialog
+          report={mergeReport}
+          onClose={() => setMergeReport(null)}
+          onRetry={retryMerge}
+        />
+      )}
     </div>
   );
 }
