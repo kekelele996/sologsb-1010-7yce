@@ -7,7 +7,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:sync": "esbuild scripts/test-sync.mts --bundle --platform=node --format=esm --outfile=scripts/.test-sync.mjs && node scripts/.test-sync.mjs"
   },
   "dependencies": {
     "@material/web": "^2.5.0",

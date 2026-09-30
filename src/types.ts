@@ -31,6 +31,14 @@ export interface BrailleToken {
   offset: number;
 }
 
+export interface LineAlternative {
+  id: string;
+  packageId: string;
+  teacherName: string;
+  source: string;
+  createdAt: string;
+}
+
 export interface TextbookLine {
   id: string;
   source: string;
@@ -39,6 +47,17 @@ export interface TextbookLine {
   note: string;
   continuesPrevious: boolean;
   continuesNext: boolean;
+  /** 同一行原文双方都改过、落选的另一版，留待组长挑选。 */
+  alternatives: LineAlternative[];
+}
+
+/** 已合入（或合入失败）的校对包记录，用于断点续合与幂等。 */
+export interface IncomingPackageRecord {
+  packageId: string;
+  teacherName: string;
+  receivedAt: string;
+  mergedLineIds: string[];
+  blockedLineIds: string[];
 }
 
 export interface ProofIssue {
@@ -70,6 +89,8 @@ export interface ProjectState {
   selectedLineId: string;
   issues: ProofIssue[];
   versions: VersionSnapshot[];
+  /** 已接收过的校对包记录（按 packageId 去重，断点续合）。 */
+  incomingPackages: IncomingPackageRecord[];
   lastCheckedAt: string;
   updatedAt: string;
 }

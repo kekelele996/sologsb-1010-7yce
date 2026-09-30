@@ -166,6 +166,66 @@ md-linear-progress { width: 100%; --md-linear-progress-active-indicator-color: #
 .issue-chip.info { color: #315e70; background: #e2f3f8; }
 .note-field { margin-top: 9px; --md-outlined-text-field-container-height: 42px; }
 
+/* 离线协作：待选原文 */
+.alternatives-strip { margin-top: 9px; display: flex; flex-direction: column; gap: 7px; }
+.alternative-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px dashed #c99a4b; border-radius: 8px; background: #fff8ec; }
+.alternative-tag { display: inline-block; font-size: 10px; font-weight: 700; color: #8a5a12; background: #fbe7c4; padding: 2px 7px; border-radius: 9px; }
+.alternative-text { min-width: 0; }
+.alternative-text p { margin: 5px 0 0; font-size: 13px; line-height: 1.5; color: #4a3a1c; white-space: pre-wrap; word-break: break-word; }
+.alternative-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+
+/* 离线协作：弹窗 */
+.modal-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(12, 30, 26, .45); }
+.modal-dialog { width: min(680px, calc(100vw - 48px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; background: var(--paper); border-radius: 14px; box-shadow: 0 18px 60px rgba(10, 30, 25, .28); overflow: hidden; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px 12px; border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 0; font-size: 17px; color: #1d3b33; }
+.modal-body { padding: 18px 20px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: #f6faf8; }
+.modal-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.modal-hint code { background: #e7efec; padding: 1px 5px; border-radius: 4px; }
+.stack-md { display: flex; flex-direction: column; gap: 14px; }
+.field-label { margin: 0 0 6px; font-size: 12px; font-weight: 700; color: #35514a; }
+.mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: #eaf1ee; padding: 4px; border-radius: 10px; }
+.mode-tabs button { border: 0; border-radius: 8px; padding: 8px; background: transparent; cursor: pointer; font-size: 12px; color: #5a6b65; }
+.mode-tabs button.active { background: white; color: #22473d; font-weight: 700; box-shadow: 0 1px 4px rgba(20,47,40,.12); }
+.scope-options { display: flex; flex-direction: column; gap: 7px; font-size: 13px; color: #33443f; }
+.scope-options label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.range-inputs { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; margin-top: 10px; }
+.baseline-callout { padding: 10px 12px; border-radius: 9px; background: #eef6f2; border: 1px solid #cde0d7; }
+.baseline-callout.mismatch { background: #fdeeec; border-color: #ecc4be; }
+.baseline-callout strong { font-size: 12px; }
+.baseline-callout p { margin: 4px 0 0; font-size: 11px; color: var(--muted); }
+.danger-text, .report-metrics .danger, .conflict-title { color: var(--danger); }
+.file-picker { display: block; position: relative; }
+.file-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.file-picker span { display: block; padding: 11px 14px; border: 1.5px dashed #8ba79d; border-radius: 10px; text-align: center; color: #3c6056; font-size: 13px; background: #fbfdfc; }
+.file-picker:hover span { border-color: #4c806f; background: #f2f9f5; }
+.handoff-block { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: white; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.handoff-block strong { font-size: 13px; }
+.handoff-block p { margin: 0 0 4px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+.modal-alert { padding: 10px 12px; border-radius: 9px; font-size: 12px; line-height: 1.55; }
+.modal-alert.error { background: #fdecea; color: #8c1d18; border: 1px solid #f2c5c0; }
+.modal-alert.success { background: #e8f5ee; color: #23513d; border: 1px solid #bfe2cf; }
+.merge-report { display: flex; flex-direction: column; gap: 12px; }
+.merge-report-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.merge-report-head strong { font-size: 14px; }
+.report-badge { font-size: 10px; padding: 3px 8px; border-radius: 9px; background: #e2eef8; color: #234a63; }
+.report-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.report-metrics span { padding: 8px 10px; background: #f1f6f3; border-radius: 8px; font-size: 11px; color: var(--muted); }
+.report-metrics b { display: block; font-size: 17px; color: #26463d; }
+.report-metrics span.danger b { color: var(--danger); }
+.conflict-list { display: flex; flex-direction: column; gap: 9px; }
+.conflict-title { margin: 0; font-size: 12px; font-weight: 700; }
+.conflict-item { padding: 10px 12px; border: 1px solid #eec9c3; border-radius: 9px; background: #fdf4f3; }
+.conflict-item strong { font-size: 12px; color: #7b2722; }
+.conflict-item p { margin: 5px 0 0; font-size: 11px; line-height: 1.55; color: #5f3c39; }
+.conflict-lines { margin-top: 7px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 11px; color: #7b2722; }
+.line-jump-chip { border: 1px solid #e2b3ab; background: white; color: #8c1d18; border-radius: 9px; padding: 2px 9px; font-size: 11px; cursor: pointer; }
+.line-jump-chip:hover { background: #fdeeea; }
+.conflict-hint { margin: 0; font-size: 11px; color: #8a4a44; line-height: 1.55; }
+.report-notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.report-notes li { font-size: 11px; color: #46574f; line-height: 1.55; }
+
 .inspector-tabs { height: 50px; display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: white; }
 .inspector-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: #697671; font-size: 12px; }
 .inspector-tabs button.active { color: #244f43; border-bottom-color: #39715f; font-weight: 700; }

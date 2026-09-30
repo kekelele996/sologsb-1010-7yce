@@ -1,11 +1,42 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { analyzeProject, brailleCellCount, makeRule, outputText, updateRuleInSet } from './braille';
+import { analyzeProject, brailleCellCount, makeRule, outputText, transcribeLine, updateRuleInSet } from './braille';
 import { createInitialProject } from './sample';
+import {
+  adoptAlternative,
+  buildHandoffPackage,
+  buildProofPackage,
+  describeBaseline,
+  discardAlternative,
+  makeMemento,
+  mergeProofPackage,
+  parsePackage,
+  scopeLineIds,
+  stateFromHandoff,
+  type ExportScope,
+  type HandoffPackage,
+  type MergeReport,
+  type ProjectMemento,
+  type ProofPackage,
+} from './sync';
 import type { HistoryState, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
 
 const STORAGE_KEY = 'sologsb-1010-braille-project-v1';
+const BASELINE_KEY = 'sologsb-1010-braille-baseline-v1';
 const HISTORY_LIMIT = 60;
+
+function emptyLine(id = `line-${Date.now()}`): TextbookLine {
+  return { id, source: '', tokens: [], status: 'unchecked', note: '', continuesPrevious: false, continuesNext: false, alternatives: [] };
+}
+
+/** 旧版本本地草稿补齐新字段（alternatives、incomingPackages）。 */
+function normalizeProject(state: ProjectState): ProjectState {
+  return {
+    ...state,
+    lines: state.lines.map((line) => ({ ...line, alternatives: Array.isArray(line.alternatives) ? line.alternatives : [] })),
+    incomingPackages: Array.isArray(state.incomingPackages) ? state.incomingPackages : [],
+  };
+}
 
 type HistoryAction =
   | { type: 'commit'; label: string; update: (state: ProjectState) => ProjectState }
@@ -44,23 +75,41 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
   if (next === state.present) return state;
   return {
     past: [...state.past, state.present].slice(-HISTORY_LIMIT),
-    present: next,
+    present: normalizeProject(next),
     future: [],
     lastAction: action.label,
   };
 }
 
 function loadInitialState(): ProjectState {
+  let state: ProjectState | undefined;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as ProjectState;
-      return analyzeProject(parsed);
+      state = analyzeProject(normalizeProject(JSON.parse(raw) as ProjectState));
     }
   } catch {
     // 清除损坏草稿并使用内置示例。
   }
-  return createInitialProject();
+  if (!state) state = createInitialProject();
+  // 第一次使用（或旧草稿升级）：把当前组稿存成基线，供老师导出校对包三路合并。
+  try {
+    if (!localStorage.getItem(BASELINE_KEY)) {
+      localStorage.setItem(BASELINE_KEY, JSON.stringify(makeMemento(state)));
+    }
+  } catch {
+    // localStorage 不可用时基线功能静默降级。
+  }
+  return state;
+}
+
+function loadBaseline(): ProjectMemento | undefined {
+  try {
+    const raw = localStorage.getItem(BASELINE_KEY);
+    return raw ? (JSON.parse(raw) as ProjectMemento) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function useProject() {
@@ -220,6 +269,8 @@ function LineCard({
   onNote,
   onStatus,
   onDelete,
+  onAdoptAlternative,
+  onDiscardAlternative,
 }: {
   line: TextbookLine;
   index: number;
@@ -230,6 +281,8 @@ function LineCard({
   onNote: (note: string) => void;
   onStatus: (status: TextbookLine['status']) => void;
   onDelete: () => void;
+  onAdoptAlternative: (alternativeId: string) => void;
+  onDiscardAlternative: (alternativeId: string) => void;
 }) {
   const unresolved = issues.filter((issue) => !issue.resolved);
   const lineIssues = unresolved.filter((issue) => issue.lineId === line.id);
@@ -277,6 +330,22 @@ function LineCard({
             ))}
           </div>
         )}
+        {line.alternatives.length > 0 && (
+          <div class="alternatives-strip">
+            {line.alternatives.map((alternative) => (
+              <div class="alternative-row" key={alternative.id}>
+                <div class="alternative-text">
+                  <span class="alternative-tag">待组长挑选 · {alternative.teacherName || '老师'} 版原文</span>
+                  <p>{alternative.source || '（空行）'}</p>
+                </div>
+                <div class="alternative-actions">
+                  <md-text-button onClick={(event: MouseEvent) => { event.stopPropagation(); onAdoptAlternative(alternative.id); }}>采用此版</md-text-button>
+                  <md-icon-button aria-label="放弃此待选版本" title="放弃此版" onClick={(event: MouseEvent) => { event.stopPropagation(); onDiscardAlternative(alternative.id); }}>×</md-icon-button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {selected && (
           <md-outlined-text-field
             class="note-field"
@@ -300,6 +369,8 @@ function EditorPanel({
   onAddLine,
   onSplitLongLines,
   onImport,
+  onAdoptAlternative,
+  onDiscardAlternative,
 }: {
   state: ProjectState;
   onSelectLine: (id: string) => void;
@@ -310,6 +381,8 @@ function EditorPanel({
   onAddLine: () => void;
   onSplitLongLines: () => void;
   onImport: (text: string) => void;
+  onAdoptAlternative: (lineId: string, alternativeId: string) => void;
+  onDiscardAlternative: (lineId: string, alternativeId: string) => void;
 }) {
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
@@ -367,6 +440,8 @@ function EditorPanel({
             onNote={(note) => onNote(line.id, note)}
             onStatus={(status) => onStatus(line.id, status)}
             onDelete={() => onDelete(line.id)}
+            onAdoptAlternative={(alternativeId) => onAdoptAlternative(line.id, alternativeId)}
+            onDiscardAlternative={(alternativeId) => onDiscardAlternative(line.id, alternativeId)}
           />
         ))}
       </div>
@@ -479,9 +554,270 @@ function VersionsPanel({ state, onSnapshot, onRestore }: { state: ProjectState; 
   );
 }
 
+function downloadJson(filename: string, data: unknown): void {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function safeFilename(value: string): string {
+  return value.replace(/[^\p{L}\p{N}-]+/gu, '-').replace(/^-+|-+$/g, '') || 'braille-atelier';
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'));
+    reader.readAsText(file);
+  });
+}
+
+function MergeDialog({
+  onClose,
+  onFile,
+  report,
+  error,
+  state,
+  onJumpLine,
+}: {
+  onClose: () => void;
+  onFile: (file: File) => void;
+  report: MergeReport | null;
+  error: string;
+  state: ProjectState;
+  onJumpLine: (lineId: string) => void;
+}) {
+  const lineNumber = (lineId: string): number => state.lines.findIndex((line) => line.id === lineId) + 1;
+  return (
+    <div class="modal-backdrop" onClick={onClose}>
+      <div class="modal-dialog" onClick={(event) => event.stopPropagation()}>
+        <div class="modal-head">
+          <h2>合入校对包</h2>
+          <md-icon-button aria-label="关闭" onClick={onClose}>×</md-icon-button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">选择老师交回的 <code>.proof.json</code> 校对包。同一份包重复提交不会多出记录；被规则挡住的行修好规则后再交同一包即可续合。</p>
+          <label class="file-picker">
+            <input type="file" accept=".json,application/json" onChange={(event) => {
+              const file = (event.currentTarget as HTMLInputElement).files?.[0];
+              if (file) onFile(file);
+              (event.currentTarget as HTMLInputElement).value = '';
+            }} />
+            <span>选择校对包文件…</span>
+          </label>
+          {error && <div class="modal-alert error">{error}</div>}
+          {report && (
+            <div class="merge-report">
+              <div class="merge-report-head">
+                <strong>{report.teacherName || '老师'} 的校对包</strong>
+                {report.alreadyKnown && <span class="report-badge">续合：只处理上次没合上的行</span>}
+              </div>
+              <div class="report-metrics">
+                <span><b>{report.merged}</b> 行本次合入</span>
+                <span><b>{report.unchanged}</b> 行无变化</span>
+                <span><b>{report.newLines}</b> 行新增</span>
+                <span class={report.blocked ? 'danger' : ''}><b>{report.blocked}</b> 行被挡未合</span>
+                <span><b>{report.pendingAlternatives}</b> 版原文待组长挑</span>
+                <span><b>{report.ruleChangesApplied}</b> 处规则采用老师版</span>
+              </div>
+              {report.conflicts.length > 0 && (
+                <div class="conflict-list">
+                  <p class="conflict-title">规则集对不上，以下行已暂停合入：</p>
+                  {report.conflicts.map((conflict, index) => (
+                    <div class="conflict-item" key={`${conflict.ruleSetId}-${conflict.ruleId ?? 'settings'}-${index}`}>
+                      <strong>「{conflict.ruleSetName}」{conflict.ruleSource ? `规则“${conflict.ruleSource}”` : '规则集设置'}</strong>
+                      <p>{conflict.detail}</p>
+                      {conflict.affectedLineIds.length > 0 && (
+                        <div class="conflict-lines">
+                          挡住的行：
+                          {conflict.affectedLineIds.map((lineId) => {
+                            const ordinal = lineNumber(lineId);
+                            return (
+                              <button key={lineId} class="line-jump-chip" onClick={() => onJumpLine(lineId)}>
+                                第 {ordinal > 0 ? ordinal : '?'} 行
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <p class="conflict-hint">请在左边规则面板里统一双方的规则，然后让老师重新交同一份包（或直接再次选择该包文件）续合。</p>
+                </div>
+              )}
+              {report.notes.length > 0 && (
+                <ul class="report-notes">
+                  {report.notes.map((note, index) => <li key={index}>{note}</li>)}
+                </ul>
+              )}
+              {report.blocked === 0 && report.conflicts.length === 0 && (
+                <div class="modal-alert success">本次负责范围内的行已全部处理完毕。</div>
+              )}
+            </div>
+          )}
+        </div>
+        <div class="modal-foot">
+          <md-filled-button onClick={onClose}>完成</md-filled-button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExportDialog({
+  state,
+  baseline,
+  onClose,
+  onExportProof,
+  onExportHandoff,
+  onImportHandoff,
+}: {
+  state: ProjectState;
+  baseline: ProjectMemento | undefined;
+  onClose: () => void;
+  onExportProof: (teacherName: string, scope: ExportScope, start: number, end: number) => string | null;
+  onExportHandoff: () => void;
+  onImportHandoff: (file: File) => Promise<string | null>;
+}) {
+  const [mode, setMode] = useState<'proof' | 'handoff'>('proof');
+  const [teacherName, setTeacherName] = useState('');
+  const [scope, setScope] = useState<ExportScope>('odd');
+  const [start, setStart] = useState(1);
+  const [end, setEnd] = useState(Math.max(1, state.lines.length));
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  const baselineMismatch = baseline && baseline.projectId !== state.id;
+  const previewIds = scopeLineIds(state.lines, scope, start, end);
+  const validRange = start >= 1 && end >= start && start <= state.lines.length;
+
+  const submitProof = () => {
+    if (!teacherName.trim()) {
+      setError('请填写老师姓名。');
+      return;
+    }
+    if (!baseline) {
+      setError('本机还没有组稿基线，请先让组长导出「交接包」并在本机导入。');
+      return;
+    }
+    if (baselineMismatch) {
+      setError('基线属于另一份教材，不能据此导出；请重新导入该教材的交接包。');
+      return;
+    }
+    if (scope === 'range' && !validRange) {
+      setError(`行号范围无效，本教材共 ${state.lines.length} 行。`);
+      return;
+    }
+    const issue = onExportProof(teacherName.trim(), scope, start, end);
+    if (issue) {
+      setError(issue);
+      return;
+    }
+    setDone(`已导出 ${previewIds.length} 行的校对包，可离线发给组长。`);
+  };
+
+  const submitHandoffImport = async (file: File) => {
+    setImporting(true);
+    setError('');
+    const issue = await onImportHandoff(file);
+    setImporting(false);
+    if (issue) setError(issue);
+    else {
+      setDone('已载入组里的交接包并设为基线，现在可以离线校对了。');
+    }
+  };
+
+  return (
+    <div class="modal-backdrop" onClick={onClose}>
+      <div class="modal-dialog" onClick={(event) => event.stopPropagation()}>
+        <div class="modal-head">
+          <h2>离线协作包</h2>
+          <md-icon-button aria-label="关闭" onClick={onClose}>×</md-icon-button>
+        </div>
+        <div class="modal-body">
+          <div class="mode-tabs">
+            <button class={mode === 'proof' ? 'active' : ''} onClick={() => { setMode('proof'); setError(''); setDone(''); }}>老师导出校对包</button>
+            <button class={mode === 'handoff' ? 'active' : ''} onClick={() => { setMode('handoff'); setError(''); setDone(''); }}>组长交接包 / 老师接收</button>
+          </div>
+
+          {mode === 'proof' && (
+            <div class="stack-md">
+              <p class="modal-hint">校对包内含：领走时的组稿基线、你负责的课文行（原文/状态/备注）以及当前规则集。组长合入时据此三路合并。</p>
+              <md-outlined-text-field label="老师姓名" value={teacherName} onInput={(event: any) => setTeacherName(event.currentTarget.value)} />
+              <div>
+                <p class="field-label">负责的课文行（两位老师各校对一半）</p>
+                <div class="scope-options">
+                  <label><input type="radio" name="scope" checked={scope === 'odd'} onChange={() => setScope('odd')} /> 奇数行（第 1、3、5… 行，共 {Math.ceil(state.lines.length / 2)} 行）</label>
+                  <label><input type="radio" name="scope" checked={scope === 'even'} onChange={() => setScope('even')} /> 偶数行（第 2、4、6… 行，共 {Math.floor(state.lines.length / 2)} 行）</label>
+                  <label><input type="radio" name="scope" checked={scope === 'range'} onChange={() => setScope('range')} /> 自定义行号范围</label>
+                  <label><input type="radio" name="scope" checked={scope === 'all'} onChange={() => setScope('all')} /> 全部 {state.lines.length} 行</label>
+                </div>
+                {scope === 'range' && (
+                  <div class="range-inputs">
+                    <md-outlined-text-field label="起始行" type="number" value={String(start)} onInput={(event: any) => setStart(Number(event.currentTarget.value))} />
+                    <span>至</span>
+                    <md-outlined-text-field label="结束行" type="number" value={String(end)} onInput={(event: any) => setEnd(Number(event.currentTarget.value))} />
+                  </div>
+                )}
+              </div>
+              <div class={`baseline-callout ${baselineMismatch ? 'mismatch' : ''}`}>
+                <strong>组稿基线</strong>
+                <p>{describeBaseline(baseline)}</p>
+                {baselineMismatch && <p class="danger-text">基线与当前教材不一致，导出前请在「交接包」页重新接收。</p>}
+              </div>
+            </div>
+          )}
+
+          {mode === 'handoff' && (
+            <div class="stack-md">
+              <p class="modal-hint">
+                分组时组长点「导出整份交接包」发给老师；老师在自己电脑上点「接收交接包」载入，本机即获得完整课文和基线，之后离线校对。
+              </p>
+              <div class="handoff-block">
+                <strong>组长：导出整份组稿</strong>
+                <p>把当前整份教材、规则集和校对进度打成交接包（含基线）。</p>
+                <md-filled-tonal-button onClick={onExportHandoff}>导出整份交接包</md-filled-tonal-button>
+              </div>
+              <div class="handoff-block">
+                <strong>老师：接收交接包</strong>
+                <p>载入后会替换本机草稿并把组稿存成基线，请确认当前工作已备份。</p>
+                <label class="file-picker">
+                  <input type="file" accept=".json,application/json" disabled={importing} onChange={(event) => {
+                    const file = (event.currentTarget as HTMLInputElement).files?.[0];
+                    if (file) submitHandoffImport(file);
+                    (event.currentTarget as HTMLInputElement).value = '';
+                  }} />
+                  <span>{importing ? '正在载入…' : '选择组长的交接包…'}</span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {error && <div class="modal-alert error">{error}</div>}
+          {done && <div class="modal-alert success">{done}</div>}
+        </div>
+        <div class="modal-foot">
+          <md-text-button onClick={onClose}>关闭</md-text-button>
+          {mode === 'proof' && <md-filled-button onClick={submitProof}>导出校对包</md-filled-button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { state, history, commit, undo, redo, restore } = useProject();
   const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'versions'>('issues');
+  const [collabDialog, setCollabDialog] = useState<'none' | 'export' | 'merge'>('none');
+  const [baseline, setBaseline] = useState<ProjectMemento | undefined>(() => loadBaseline());
+  const [mergeReport, setMergeReport] = useState<MergeReport | null>(null);
+  const [mergeError, setMergeError] = useState('');
   const selectedLineRef = useRef(state.selectedLineId);
   selectedLineRef.current = state.selectedLineId;
 
@@ -563,6 +899,67 @@ export default function App() {
     commit('记录版本快照', (current) => ({ ...current, versions: [createSnapshot(action, current), ...current.versions].slice(0, 20), updatedAt: new Date().toISOString() }));
   };
 
+  const handleExportProof = (teacherName: string, scope: ExportScope, start: number, end: number): string | null => {
+    if (!baseline) return '本机还没有组稿基线。';
+    if (baseline.projectId !== state.id) return '基线属于另一份教材，请重新接收交接包。';
+    const pkg = buildProofPackage(state, baseline, teacherName, scope, start, end);
+    if (pkg.lineIds.length === 0) return '所选范围内没有课文行。';
+    downloadJson(`${safeFilename(state.title)}-${safeFilename(teacherName)}-校对包.proof.json`, pkg);
+    return null;
+  };
+
+  const handleExportHandoff = () => {
+    const pkg = buildHandoffPackage(state);
+    downloadJson(`${safeFilename(state.title)}-交接包.handoff.json`, pkg);
+  };
+
+  const handleImportHandoff = async (file: File): Promise<string | null> => {
+    try {
+      const parsed = parsePackage(await readFileAsText(file));
+      if (parsed.format !== 'braille-atelier/handoff') {
+        return '这不是组长交接包（而是校对包）；老师合稿请使用顶栏的「合入校对包」。';
+      }
+      const next = analyzeProject(stateFromHandoff(parsed as HandoffPackage, state));
+      localStorage.setItem(BASELINE_KEY, JSON.stringify(parsed.snapshot));
+      setBaseline(parsed.snapshot);
+      restore(next);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : '交接包解析失败。';
+    }
+  };
+
+  const handleMergeFile = async (file: File) => {
+    setMergeError('');
+    setMergeReport(null);
+    try {
+      const parsed = parsePackage(await readFileAsText(file));
+      if (parsed.format !== 'braille-atelier/proof') {
+        setMergeError('这不是老师校对包（像是组长交接包）。');
+        return;
+      }
+      const pkg = parsed as ProofPackage;
+      const { state: next, report } = mergeProofPackage(state, pkg, { analyze: analyzeProject, transcribe: transcribeLine });
+      const noChange = report.merged === 0 && report.blocked === 0 && report.pendingAlternatives === 0
+        && report.newLines === 0 && report.ruleChangesApplied === 0 && report.alreadyKnown;
+      if (!noChange) {
+        commit('合入校对包', () => next);
+      }
+      setMergeReport(report);
+    } catch (error) {
+      setMergeError(error instanceof Error ? error.message : '校对包解析失败。');
+    }
+  };
+
+  const handleAdoptAlternative = (lineId: string, alternativeId: string) => {
+    commit('采用老师待选原文', (current) => adoptAlternative(current, lineId, alternativeId, { analyze: analyzeProject, transcribe: transcribeLine }));
+  };
+
+  const handleDiscardAlternative = (lineId: string, alternativeId: string) => {
+    commit('放弃待选原文', (current) => discardAlternative(current, lineId, alternativeId));
+  };
+
+
   const exportText = () => {
     const blob = new Blob([`${state.title}\n规则集：${activeRuleSet.name}\n\n${outputText(state)}\n`], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -607,7 +1004,7 @@ export default function App() {
       .filter(Boolean);
     commit('导入课文', (current) => analyzeProject({
       ...current,
-      lines: sourceLines.map((source, index) => ({ id: `line-import-${Date.now()}-${index}`, source, tokens: [], status: index === 0 ? 'questionable' : 'unchecked', note: index === 0 ? '导入后待确认规则集。' : '', continuesPrevious: false, continuesNext: false })),
+      lines: sourceLines.map((source, index) => ({ ...emptyLine(`line-import-${Date.now()}-${index}`), source, status: index === 0 ? 'questionable' : 'unchecked', note: index === 0 ? '导入后待确认规则集。' : '' })),
       selectedLineId: '',
       issues: [],
     }));
@@ -628,6 +1025,8 @@ export default function App() {
         <div class="topbar-actions">
           <md-icon-button onClick={undo} disabled={history.past.length === 0} aria-label="撤销" title="撤销 ⌘Z">↶</md-icon-button>
           <md-icon-button onClick={redo} disabled={history.future.length === 0} aria-label="重做" title="重做 ⇧⌘Z">↷</md-icon-button>
+          <md-outlined-button onClick={() => { setMergeReport(null); setMergeError(''); setCollabDialog('export'); }}>导出校对包</md-outlined-button>
+          <md-outlined-button onClick={() => { setMergeReport(null); setMergeError(''); setCollabDialog('merge'); }}>合入校对包</md-outlined-button>
           <md-outlined-button onClick={exportText}>导出文本</md-outlined-button>
           <md-filled-button onClick={exportPrint}>打印版导出</md-filled-button>
         </div>
@@ -670,10 +1069,10 @@ export default function App() {
           onStatus={changeStatus}
           onDelete={(lineId) => commit('删除课文行', (current) => {
             const lines = current.lines.filter((line) => line.id !== lineId);
-            return analyzeProject({ ...current, lines: lines.length ? lines : [{ id: `line-${Date.now()}`, source: '', tokens: [], status: 'unchecked', note: '', continuesPrevious: false, continuesNext: false }], selectedLineId: lines[0]?.id ?? '' });
+            return analyzeProject({ ...current, lines: lines.length ? lines : [emptyLine()], selectedLineId: lines[0]?.id ?? '' });
           })}
           onAddLine={() => commit('新增课文行', (current) => {
-            const line: TextbookLine = { id: `line-${Date.now()}`, source: '', tokens: [], status: 'unchecked', note: '', continuesPrevious: false, continuesNext: false };
+            const line = emptyLine();
             return analyzeProject({ ...current, lines: [...current.lines, line], selectedLineId: line.id });
           })}
           onSplitLongLines={() => commit('按句拆分长行', (current) => {
@@ -684,6 +1083,8 @@ export default function App() {
             return analyzeProject({ ...current, lines });
           })}
           onImport={importCourse}
+          onAdoptAlternative={handleAdoptAlternative}
+          onDiscardAlternative={handleDiscardAlternative}
         />
 
         <aside class="right-panel">
@@ -713,6 +1114,27 @@ export default function App() {
           }} />}
         </aside>
       </div>
+
+      {collabDialog === 'export' && (
+        <ExportDialog
+          state={state}
+          baseline={baseline}
+          onClose={() => setCollabDialog('none')}
+          onExportProof={handleExportProof}
+          onExportHandoff={handleExportHandoff}
+          onImportHandoff={handleImportHandoff}
+        />
+      )}
+      {collabDialog === 'merge' && (
+        <MergeDialog
+          state={state}
+          report={mergeReport}
+          error={mergeError}
+          onClose={() => setCollabDialog('none')}
+          onFile={handleMergeFile}
+          onJumpLine={(lineId) => { selectLine(lineId, true); setCollabDialog('none'); }}
+        />
+      )}
     </div>
   );
 }
